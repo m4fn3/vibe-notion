@@ -257,13 +257,58 @@ export class TokenExtractor {
     }
   }
 
-  private async extractCookiesFromSQLite(): Promise<ExtractedToken[]> {
-    const cookiePaths = [
+  private getCookiePaths(): string[] {
+    return [
       join(this.notionDir, 'Partitions', 'notion', 'Network', 'Cookies'),
       join(this.notionDir, 'Partitions', 'notion', 'Cookies'),
       join(this.notionDir, 'Network', 'Cookies'),
       join(this.notionDir, 'Cookies'),
     ]
+  }
+
+  // Reads the `file_token` cookie, required to download file blocks from
+  // file.notion.so (token_v2 alone yields 403 there). Returns the value from
+  // the most recently accessed matching cookie, or null if unavailable.
+  async getFileToken(): Promise<string | null> {
+    if (!existsSync(this.notionDir)) {
+      return null
+    }
+
+    const sql = `SELECT name, value, encrypted_value, last_access_utc FROM cookies WHERE name = 'file_token' AND host_key LIKE '%notion%' ORDER BY last_access_utc DESC`
+    let best: { value: string; lastAccess: number } | null = null
+
+    for (const dbPath of this.getCookiePaths()) {
+      if (!existsSync(dbPath)) {
+        continue
+      }
+      let rows: CookieRow[]
+      try {
+        rows = this.copyAndQueryRows(dbPath, sql)
+      } catch (error) {
+        this.extractionErrors.push(`getFileToken: ${(error as Error).message}`)
+        continue
+      }
+      for (const row of rows) {
+        if (!row || row.name !== 'file_token') {
+          continue
+        }
+        const raw = this.resolveCookieValue(row)
+        if (!raw) {
+          continue
+        }
+        const value = extractValueFromDecrypted(raw)
+        const lastAccess = row.last_access_utc ?? 0
+        if (!best || lastAccess > best.lastAccess) {
+          best = { value, lastAccess }
+        }
+      }
+    }
+
+    return best?.value ?? null
+  }
+
+  private async extractCookiesFromSQLite(): Promise<ExtractedToken[]> {
+    const cookiePaths = this.getCookiePaths()
 
     const candidatesByToken = new Map<string, ExtractedTokenCandidate>()
 
@@ -326,6 +371,14 @@ export class TokenExtractor {
   }
 
   private readTokensFromDb(dbPath: string): ExtractedTokenCandidate[] {
+    const sql = `SELECT name, value, encrypted_value, last_access_utc FROM cookies WHERE name IN ('token_v2', 'notion_user_id', 'notion_users') AND host_key LIKE '%notion%' ORDER BY last_access_utc DESC`
+    const rows = this.copyAndQueryRows(dbPath, sql)
+    return this.buildCandidatesFromRows(rows)
+  }
+
+  // Copies the (possibly locked) cookie DB to a temp file and runs a read-only
+  // query, working under both Bun and Node. Shared by token and file_token reads.
+  private copyAndQueryRows(dbPath: string, sql: string): CookieRow[] {
     const tempDbPath = join(tmpdir(), `notion-cookies-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
 
     try {
@@ -337,13 +390,11 @@ export class TokenExtractor {
             'Quit the Notion app completely and try again.',
         )
       }
-      this.extractionErrors.push(`readTokenFromDb: failed to copy cookie DB ${dbPath}: ${(error as Error).message}`)
+      this.extractionErrors.push(`copyAndQueryRows: failed to copy cookie DB ${dbPath}: ${(error as Error).message}`)
       return []
     }
 
     try {
-      const sql = `SELECT name, value, encrypted_value, last_access_utc FROM cookies WHERE name IN ('token_v2', 'notion_user_id', 'notion_users') AND host_key LIKE '%notion%' ORDER BY last_access_utc DESC`
-
       let rows: CookieRow[]
 
       if (typeof globalThis.Bun !== 'undefined') {
@@ -363,12 +414,12 @@ export class TokenExtractor {
         db.close()
       }
 
-      return this.buildCandidatesFromRows(rows)
+      return rows
     } catch (error) {
       if (error instanceof Error && error.message.includes('better-sqlite3')) {
         throw error
       }
-      this.extractionErrors.push(`readTokenFromDb: ${(error as Error).message}`)
+      this.extractionErrors.push(`copyAndQueryRows: ${(error as Error).message}`)
       return []
     } finally {
       try {

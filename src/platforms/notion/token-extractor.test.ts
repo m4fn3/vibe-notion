@@ -883,7 +883,7 @@ describe('getErrors', () => {
     // Then
     const errors = extractor.getErrors()
     expect(errors.length).toBeGreaterThan(0)
-    expect(errors[0]).toContain('readTokenFromDb')
+    expect(errors[0]).toContain('copyAndQueryRows')
   })
 
   test('extract throws descriptive error when cookie file is locked (EBUSY)', async () => {

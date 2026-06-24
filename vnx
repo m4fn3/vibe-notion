@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# vibe-notion-x: merged build (vibe-notion CRUD + kjk/notionapi-style file/image download)
+# Resolve this script's real directory even when invoked via a PATH symlink.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+exec bun "$DIR/src/platforms/notion/cli.ts" "$@"

@@ -3,6 +3,7 @@ import path from 'node:path'
 import { Command } from 'commander'
 
 import { internalRequest } from '@/platforms/notion/client'
+import { downloadBlockFile } from '@/platforms/notion/download'
 import {
   extractTableColumnOrder,
   formatBacklinks,
@@ -644,6 +645,21 @@ async function uploadAction(
   }
 }
 
+type DownloadOptions = WorkspaceOptions & { output?: string }
+
+async function downloadAction(rawBlockId: string, options: DownloadOptions): Promise<void> {
+  try {
+    const blockId = formatNotionId(rawBlockId)
+    const creds = await getCredentialsOrExit()
+    const ctx = await ensureWorkspaceContext(creds, options.workspaceId, blockId)
+    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId)
+    const result = await downloadBlockFile(ctx.tokenV2, { blockId, output: options.output })
+    console.log(formatOutput(result, options.pretty))
+  } catch (error) {
+    handleNotionError(error)
+  }
+}
+
 type MoveOptions = WorkspaceOptions & { parent: string; after?: string; before?: string }
 
 async function moveAction(rawBlockId: string, options: MoveOptions): Promise<void> {
@@ -727,6 +743,15 @@ export const blockCommand = new Command('block')
       .option('--before <block_id>', 'Insert before this block ID')
       .option('--pretty', 'Pretty print JSON output')
       .action(uploadAction),
+  )
+  .addCommand(
+    new Command('download')
+      .description('Download the file/image stored in an image or file block')
+      .argument('<block_id>', 'Block ID of an image or file block')
+      .option('--workspace-id <id>', WORKSPACE_ID_OPTION_DESC)
+      .option('--output <path>', 'Output file path or directory (default: current dir with original filename)')
+      .option('--pretty', 'Pretty print JSON output')
+      .action(downloadAction),
   )
   .addCommand(
     new Command('move')

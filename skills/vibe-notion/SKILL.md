@@ -354,6 +354,14 @@ vibe-notion block upload <parent_id> --workspace-id <workspace_id> --file ./docu
 vibe-notion block upload <parent_id> --workspace-id <workspace_id> --file ./image.png --after <block_id> --pretty
 vibe-notion block upload <parent_id> --workspace-id <workspace_id> --file ./image.png --before <block_id> --pretty
 
+# Download the file/image stored in an image or file block
+# Resolves the block's source, mints a signed file.notion.so URL, and saves the bytes.
+# Files (e.g. PDFs) require the file_token cookie, auto-extracted from the Notion desktop
+# app (or supplied via the NOTION_FILE_TOKEN env var).
+vibe-notion block download <block_id> --workspace-id <workspace_id> --pretty
+vibe-notion block download <block_id> --output ./out/ --pretty          # save into a directory (keeps original filename)
+vibe-notion block download <block_id> --output ./renamed.pdf --pretty   # save to an explicit path
+
 # Move a block to a new position
 vibe-notion block move <block_id> --workspace-id <workspace_id> --parent <parent_id> --pretty
 vibe-notion block move <block_id> --workspace-id <workspace_id> --parent <parent_id> --after <sibling_id> --pretty
