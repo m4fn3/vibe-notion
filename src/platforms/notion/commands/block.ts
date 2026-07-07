@@ -500,6 +500,55 @@ export async function handleBlockDelete(
   return { deleted: true, id: blockId }
 }
 
+export async function handleBlockDeleteChildren(
+  tokenV2: string,
+  args: { block_id: string; workspaceId: string },
+): Promise<unknown> {
+  const blockId = formatNotionId(args.block_id)
+  await resolveAndSetActiveUserId(tokenV2, args.workspaceId)
+  const blockResponse = (await internalRequest(tokenV2, 'syncRecordValues', {
+    requests: [{ pointer: { table: 'block', id: blockId }, version: -1 }],
+  })) as SyncRecordValuesResponse
+
+  const block = assertBlock(getBlockById(blockResponse.recordMap.block, blockId), blockId)
+  const childIds = Array.isArray(block.content) ? block.content : []
+  if (childIds.length === 0) {
+    return { deleted_children: 0, id: blockId }
+  }
+
+  const spaceId = await resolveSpaceId(tokenV2, blockId)
+
+  // Archive children in chunked transactions (2 ops per child) to keep payloads bounded.
+  const CHILDREN_PER_TRANSACTION = 200
+  for (let i = 0; i < childIds.length; i += CHILDREN_PER_TRANSACTION) {
+    const chunk = childIds.slice(i, i + CHILDREN_PER_TRANSACTION)
+    const operations: SaveOperation[] = []
+    for (const childId of chunk) {
+      operations.push(
+        {
+          pointer: { table: 'block', id: childId, spaceId },
+          command: 'update',
+          path: [],
+          args: { alive: false },
+        },
+        {
+          pointer: { table: 'block', id: blockId, spaceId },
+          command: 'listRemove',
+          path: ['content'],
+          args: { id: childId },
+        },
+      )
+    }
+    const payload: SaveTransactionsRequest = {
+      requestId: generateId(),
+      transactions: [{ id: generateId(), spaceId, operations }],
+    }
+    await internalRequest(tokenV2, 'saveTransactions', payload)
+  }
+
+  return { deleted_children: childIds.length, id: blockId }
+}
+
 export async function handleBlockUpload(
   tokenV2: string,
   args: { parent_id: string; file: string; after?: string; before?: string; workspaceId: string },
@@ -645,6 +694,21 @@ async function uploadAction(
   }
 }
 
+async function deleteChildrenAction(rawBlockId: string, options: WorkspaceOptions): Promise<void> {
+  try {
+    const blockId = formatNotionId(rawBlockId)
+    const creds = await getCredentialsOrExit()
+    const ctx = await ensureWorkspaceContext(creds, options.workspaceId, blockId)
+    const result = await handleBlockDeleteChildren(ctx.tokenV2, {
+      block_id: blockId,
+      workspaceId: ctx.workspaceId,
+    })
+    console.log(formatOutput(result, options.pretty))
+  } catch (error) {
+    handleNotionError(error)
+  }
+}
+
 type DownloadOptions = WorkspaceOptions & { output?: string }
 
 async function downloadAction(rawBlockId: string, options: DownloadOptions): Promise<void> {
@@ -732,6 +796,14 @@ export const blockCommand = new Command('block')
       .option('--workspace-id <id>', WORKSPACE_ID_OPTION_DESC)
       .option('--pretty', 'Pretty print JSON output')
       .action(deleteAction),
+  )
+  .addCommand(
+    new Command('delete-children')
+      .description('Delete (archive) all direct children of a block, keeping the block itself')
+      .argument('<block_id>', 'Parent block ID (e.g. a page ID)')
+      .option('--workspace-id <id>', WORKSPACE_ID_OPTION_DESC)
+      .option('--pretty', 'Pretty print JSON output')
+      .action(deleteChildrenAction),
   )
   .addCommand(
     new Command('upload')

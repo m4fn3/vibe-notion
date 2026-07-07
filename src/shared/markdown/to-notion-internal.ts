@@ -36,6 +36,9 @@ function convertNode(node: RootContent): InternalBlockDefinition[] {
       return [convertTable(node)]
     case 'thematicBreak':
       return [{ type: 'divider' }]
+    case 'html':
+      // Preserve raw HTML-ish text (e.g. bare "<year>" tokens in technical docs) instead of dropping it.
+      return [{ type: 'text', properties: { title: [[(node as { value: string }).value]] } }]
     default:
       return []
   }
@@ -90,16 +93,26 @@ function convertListItem(node: ListItem, ordered: boolean): InternalBlockDefinit
 }
 
 function convertBlockquote(node: Blockquote): InternalBlockDefinition {
+  // First paragraph becomes the quote title; everything else (lists, further
+  // paragraphs, code, nested quotes...) is preserved as children instead of
+  // being dropped.
   const segments: RichTextSegment[] = []
+  const children: InternalBlockDefinition[] = []
+  let titleTaken = false
   for (const child of node.children) {
-    if (child.type === 'paragraph') {
+    if (child.type === 'paragraph' && !titleTaken) {
       segments.push(...convertInlineContent(child.children))
+      titleTaken = true
+    } else {
+      children.push(...convertNode(child))
     }
   }
-  return {
+  const block: InternalBlockDefinition = {
     type: 'quote',
     properties: { title: segments.length > 0 ? segments : [['']] },
   }
+  if (children.length > 0) block.children = children
+  return block
 }
 
 function convertCode(node: Code): InternalBlockDefinition {
@@ -155,6 +168,10 @@ function convertInlineContent(nodes: PhrasingContent[]): RichTextSegment[] {
 function convertInlineNode(node: PhrasingContent, annotations: string[][]): RichTextSegment[] {
   switch (node.type) {
     case 'text':
+      return annotations.length > 0 ? [[node.value, annotations]] : [[node.value]]
+
+    case 'html':
+      // Inline raw HTML-ish tokens (e.g. bare "<year>_<set>") — keep as literal text, do not drop.
       return annotations.length > 0 ? [[node.value, annotations]] : [[node.value]]
 
     case 'strong': {
