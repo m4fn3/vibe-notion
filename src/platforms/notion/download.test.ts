@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
-import { downloadBlockFile, downloadDeps } from './download'
+import { downloadBlockFile, downloadDeps, fetchFileTokenOverHttp } from './download'
 
 const BLOCK_ID = '380e56d2-11e0-80a3-97a7-f1614dbf3a61'
 
@@ -104,5 +104,32 @@ describe('downloadBlockFile', () => {
     downloadDeps.fetch = mock(() => Promise.resolve(new Response('x'))) as unknown as typeof downloadDeps.fetch
 
     await expect(downloadBlockFile('tok', { blockId: BLOCK_ID })).rejects.toThrow('no downloadable file')
+  })
+})
+
+describe('fetchFileTokenOverHttp', () => {
+  const originalFetch = downloadDeps.fetch
+
+  afterEach(() => {
+    downloadDeps.fetch = originalFetch
+  })
+
+  test('reads file_token from the Set-Cookie of an api/v3 call', async () => {
+    downloadDeps.fetch = mock((url: string, init: RequestInit) => {
+      expect(url).toContain('/api/v3/loadUserContent')
+      expect((init.headers as Record<string, string>).cookie).toBe('token_v2=tok')
+      const headers = new Headers()
+      headers.append('set-cookie', 'device_id=abc; Path=/; HttpOnly')
+      headers.append('set-cookie', 'file_token=v03%3Aft; Domain=.notion.so; Path=/f; HttpOnly')
+      return Promise.resolve(new Response('{}', { headers }))
+    }) as unknown as typeof downloadDeps.fetch
+
+    expect(await fetchFileTokenOverHttp('tok')).toBe('v03%3Aft')
+  })
+
+  test('returns null when the request fails', async () => {
+    downloadDeps.fetch = mock(() => Promise.reject(new Error('offline'))) as unknown as typeof downloadDeps.fetch
+
+    expect(await fetchFileTokenOverHttp('tok')).toBeNull()
   })
 })

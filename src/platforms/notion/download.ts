@@ -109,7 +109,33 @@ function buildProxyUrl(source: string, record: PermissionRecord): string {
 // file_token authorizes file access — without file_token, file.notion.so 403s.
 let cachedFileToken: string | null | undefined
 
-async function resolveFileToken(): Promise<string | undefined> {
+// Notion mints file_token from token_v2 alone: any /api/v3 call answers with a
+// `Set-Cookie: file_token=...`. This keeps downloads working on machines with no
+// Notion desktop app (headless servers), where the cookie DB doesn't exist.
+export async function fetchFileTokenOverHttp(tokenV2: string): Promise<string | null> {
+  try {
+    const response = await downloadDeps.fetch('https://www.notion.so/api/v3/loadUserContent', {
+      method: 'POST',
+      headers: { cookie: `token_v2=${tokenV2}`, 'content-type': 'application/json' },
+      body: '{}',
+    })
+    const setCookie =
+      typeof response.headers.getSetCookie === 'function'
+        ? response.headers.getSetCookie()
+        : [response.headers.get('set-cookie') ?? '']
+    for (const cookie of setCookie) {
+      const match = /(?:^|;\s*)file_token=([^;]+)/.exec(cookie)
+      if (match) {
+        return match[1]
+      }
+    }
+  } catch {
+    // fall through — download still attempts token_v2-only and proxy paths
+  }
+  return null
+}
+
+async function resolveFileToken(tokenV2: string): Promise<string | undefined> {
   if (cachedFileToken !== undefined) {
     return cachedFileToken ?? undefined
   }
@@ -122,6 +148,9 @@ async function resolveFileToken(): Promise<string | undefined> {
     cachedFileToken = await new TokenExtractor().getFileToken()
   } catch {
     cachedFileToken = null
+  }
+  if (!cachedFileToken) {
+    cachedFileToken = await fetchFileTokenOverHttp(tokenV2)
   }
   return cachedFileToken ?? undefined
 }
@@ -202,7 +231,7 @@ export async function downloadBlockFile(
     spaceId,
   }
   const title = firstPropertyString(properties?.title)
-  const fileToken = await resolveFileToken()
+  const fileToken = await resolveFileToken(tokenV2)
 
   const attempts: Array<{ via: DownloadResult['via']; run: () => Promise<{ buffer: Buffer; contentType?: string }> }> =
     [
