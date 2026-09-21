@@ -703,6 +703,9 @@ function buildPageChildren(blocks: Record<string, Record<string, unknown>>, chil
   for (const childId of childIds) {
     const child = getRecordValue(blocks[childId])
     if (!child) {
+      // Referenced but not loaded (no access or deleted). Surface it rather than
+      // dropping it, so an unloaded subtree can't pass for an empty one.
+      children.push({ id: childId, type: 'unavailable', text: '' })
       continue
     }
 
@@ -718,7 +721,8 @@ function buildPageChildren(blocks: Record<string, Record<string, unknown>>, chil
     }
 
     const nestedIds = toStringArray(child.content)
-    if (nestedIds.length > 0) {
+    const isSubpage = type === 'page' || type === 'collection_view_page'
+    if (nestedIds.length > 0 && !isSubpage) {
       if (type === 'table') {
         const columnOrder = extractTableColumnOrder(child)
         node.children = buildTableRowChildren(blocks, nestedIds, columnOrder)

@@ -446,6 +446,95 @@ describe('PageCommand', () => {
     expect(result.blocks[1].text).toBe('Block 2')
   })
 
+  test('page get fetches collapsed toggle children that loadPageChunk omits', async () => {
+    const block = (id: string, type: string, title: string, content?: string[]) => ({
+      value: { id, type, properties: { title: [[title]] }, ...(content ? { content } : {}) },
+      role: 'editor',
+    })
+    const syncRequests: string[][] = []
+    const mockInternalRequest = mock(async (_tokenV2: string, endpoint: string, body: any) => {
+      if (endpoint === 'loadPageChunk') {
+        return {
+          cursor: { stack: [] },
+          recordMap: {
+            block: {
+              'page-1': block('page-1', 'page', 'Test Page', ['heading-1', 'sub-page']),
+              'heading-1': block('heading-1', 'sub_sub_header', 'Heading', ['toggle-1']),
+              'sub-page': block('sub-page', 'page', 'Child Page', ['sub-page-block']),
+            },
+          },
+        }
+      }
+      if (endpoint === 'syncRecordValues') {
+        const ids = body.requests.map((r: any) => r.pointer.id)
+        syncRequests.push(ids)
+        const known: Record<string, unknown> = {
+          'toggle-1': block('toggle-1', 'toggle', 'Toggle', ['leaf-1', 'gone']),
+          'leaf-1': block('leaf-1', 'text', 'Leaf'),
+        }
+        return {
+          recordMap: {
+            block: Object.fromEntries(ids.filter((id: string) => known[id]).map((id: string) => [id, known[id]])),
+          },
+        }
+      }
+      return {}
+    })
+
+    mock.module('../client', () => ({
+      internalRequest: mockInternalRequest,
+    }))
+
+    mock.module('./helpers', () => ({
+      getCredentialsOrExit: mock(async () => ({ token_v2: 'test-token' })),
+      generateId: mock(() => 'uuid-1'),
+      resolveSpaceId: mock(async () => 'space-123'),
+      resolveCollectionViewId: mock(async () => 'view-mock'),
+      resolveAndSetActiveUserId: mock(async () => {}),
+      resolveBacklinkUsers: mock(async () => ({})),
+      resolveDefaultTeamId: mock(async () => undefined),
+      ensureWorkspaceContext: mock(async (creds, workspaceId) => ({
+        workspaceId: workspaceId ?? 'space-mock',
+        tokenV2: (creds && creds.token_v2) || 'test-token',
+        userId: creds && creds.user_id,
+      })),
+      resolveWorkspaceFromTarget: mock(async () => ({ workspaceId: 'space-mock', tokenV2: 'test-token' })),
+      getAccountTokens: mock((creds) => [
+        { token_v2: (creds && creds.token_v2) || 'test-token', user_id: creds && creds.user_id },
+      ]),
+    }))
+
+    const { pageCommand } = await import('./page')
+    const output: string[] = []
+    const originalLog = console.log
+    console.log = (msg: string) => output.push(msg)
+
+    try {
+      await pageCommand.parseAsync(['get', 'page-1', '--workspace-id', 'space-123'], { from: 'user' })
+    } catch {
+      // Expected to exit
+    }
+
+    console.log = originalLog
+
+    // Two rounds for the nested toggle; the sub-page's content and the
+    // unreturnable 'gone' block are not re-requested.
+    expect(syncRequests).toEqual([['toggle-1'], ['gone', 'leaf-1']])
+    const result = JSON.parse(output[0])
+    expect(result.blocks[0].children).toEqual([
+      {
+        id: 'toggle-1',
+        type: 'toggle',
+        text: 'Toggle',
+        children: [
+          { id: 'leaf-1', type: 'text', text: 'Leaf' },
+          { id: 'gone', type: 'unavailable', text: '' },
+        ],
+      },
+    ])
+    expect(result.blocks[1]).toEqual({ id: 'sub-page', type: 'page', text: 'Child Page' })
+  })
+
   test('page get includes backlinks when --backlinks flag is set', async () => {
     const mockInternalRequest = mock(async (_tokenV2: string, endpoint: string) => {
       if (endpoint === 'loadPageChunk') {

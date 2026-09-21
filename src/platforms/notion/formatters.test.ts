@@ -587,7 +587,7 @@ describe('formatPageGet', () => {
     expect('space_id' in result).toBe(false)
   })
 
-  test('skips missing blocks gracefully', () => {
+  test('marks referenced but unloaded blocks as unavailable', () => {
     // Given
     const blocks: Record<string, Record<string, unknown>> = {
       'page-1': {
@@ -607,8 +607,31 @@ describe('formatPageGet', () => {
     expect(result).toEqual({
       id: 'page-1',
       title: '',
-      blocks: [{ id: 'block-1', type: 'text', text: 'Present' }],
+      blocks: [
+        { id: 'missing-block', type: 'unavailable', text: '' },
+        { id: 'block-1', type: 'text', text: 'Present' },
+      ],
     })
+  })
+
+  test('does not expand sub-page content', () => {
+    // Given
+    const blocks: Record<string, Record<string, unknown>> = {
+      'page-1': {
+        value: { id: 'page-1', type: 'page', content: ['sub-1'] },
+        role: 'editor',
+      },
+      'sub-1': {
+        value: { id: 'sub-1', type: 'page', content: ['sub-block'], properties: { title: [['Child']] } },
+        role: 'editor',
+      },
+    }
+
+    // When
+    const result = formatPageGet(blocks, 'page-1')
+
+    // Then
+    expect(result.blocks).toEqual([{ id: 'sub-1', type: 'page', text: 'Child' }])
   })
 
   test('renders table blocks with ordered cell data', () => {

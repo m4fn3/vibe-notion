@@ -251,6 +251,45 @@ async function listAction(options: ListPageOptions): Promise<void> {
   }
 }
 
+// loadPageChunk omits the children of collapsed toggles and toggle headings, which
+// would otherwise render as empty. Fetch every referenced block it left out, stopping
+// at sub-pages (those are separate pages, loaded with their own `page get`).
+async function loadMissingDescendants(
+  tokenV2: string,
+  blocks: Record<string, BlockRecord>,
+  rootId: string,
+): Promise<void> {
+  const requested = new Set<string>()
+
+  for (;;) {
+    const missing: string[] = []
+    const stack = [rootId]
+    const seen = new Set<string>()
+
+    while (stack.length > 0) {
+      const id = stack.pop() as string
+      if (seen.has(id)) continue
+      seen.add(id)
+
+      const block = getRecordValue(blocks[id] as unknown as Record<string, unknown>)
+      if (!block) {
+        if (!requested.has(id)) missing.push(id)
+        continue
+      }
+      if (id !== rootId && (block.type === 'page' || block.type === 'collection_view_page')) continue
+      if (Array.isArray(block.content)) stack.push(...(block.content as string[]))
+    }
+
+    if (missing.length === 0) return
+    for (const id of missing) requested.add(id)
+
+    const response = (await internalRequest(tokenV2, 'syncRecordValues', {
+      requests: missing.map((id) => ({ pointer: { table: 'block', id }, version: -1 })),
+    })) as SyncRecordValuesResponse
+    Object.assign(blocks, response.recordMap?.block)
+  }
+}
+
 async function getAction(rawPageId: string, options: LoadPageChunkOptions): Promise<void> {
   const pageId = formatNotionId(rawPageId)
   try {
@@ -281,6 +320,8 @@ async function getAction(rawPageId: string, options: LoadPageChunkOptions): Prom
       cursor = chunk.cursor
       chunkNumber += 1
     } while (cursor.stack.length > 0)
+
+    await loadMissingDescendants(ctx.tokenV2, blocks, pageId)
 
     const result = formatPageGet(blocks as unknown as Record<string, Record<string, unknown>>, pageId, extraRecordMap)
 
