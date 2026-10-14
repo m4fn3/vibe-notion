@@ -109,6 +109,7 @@ type BlockDefinition = {
   type: string
   properties?: Record<string, unknown>
   format?: Record<string, unknown>
+  fileIds?: string[]
   children?: BlockDefinition[]
 }
 
@@ -204,7 +205,9 @@ async function getAction(rawBlockId: string, options: BlockGetOptions): Promise<
   try {
     const creds = await getCredentialsOrExit()
     const ctx = await ensureWorkspaceContext(creds, options.workspaceId, blockId)
-    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId)
+    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId, {
+      warnIfMissing: ctx.workspaceSource === 'explicit',
+    })
     const response = (await internalRequest(ctx.tokenV2, 'syncRecordValues', {
       requests: [{ pointer: { table: 'block', id: blockId }, version: -1 }],
     })) as SyncRecordValuesResponse
@@ -245,7 +248,9 @@ async function childrenAction(rawBlockId: string, options: ChildListOptions): Pr
     const cursor = parsePageChunkCursor(options.startCursor)
     const creds = await getCredentialsOrExit()
     const ctx = await ensureWorkspaceContext(creds, options.workspaceId, blockId)
-    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId)
+    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId, {
+      warnIfMissing: ctx.workspaceSource === 'explicit',
+    })
     const response = (await internalRequest(ctx.tokenV2, 'loadPageChunk', {
       pageId: blockId,
       limit: options.limit ? Number(options.limit) : 100,
@@ -324,6 +329,14 @@ function appendBlockOperations(
       args: beforeId ? { id: blockId, before: beforeId } : afterId ? { id: blockId, after: afterId } : { id: blockId },
     },
   )
+  for (const fileId of def.fileIds ?? []) {
+    operations.push({
+      pointer: { table: 'block', id: blockId, spaceId },
+      command: 'listAfter',
+      path: ['file_ids'],
+      args: { id: fileId },
+    })
+  }
   if (def.children) {
     for (const child of def.children) {
       const childBlockId = generateId()
@@ -369,7 +382,7 @@ export async function handleBlockAppend(
       await resolveAndSetActiveUserId(tokenV2, args.workspaceId)
       const spaceId = await resolveSpaceId(tokenV2, parentId)
       const result = await uploadFileOnly(tokenV2, filePath, parentId, spaceId)
-      return result.url
+      return result.source
     }
     const markdown = LOCAL_MARKDOWN_IMAGE_PATTERN.test(rawMarkdown)
       ? await preprocessMarkdownImages(rawMarkdown, uploadFn, basePath)
@@ -400,7 +413,51 @@ export async function handleBlockAppend(
     transactions: [{ id: generateId(), spaceId, operations }],
   }
   await internalRequest(tokenV2, 'saveTransactions', payload)
+  await ensureBlocksLinkedToParent(tokenV2, parentId, spaceId, newBlockIds, args.after, args.before)
   return { created: newBlockIds }
+}
+
+// Notion sometimes accepts a multi-block append but leaves the new blocks out of the parent's `content`,
+// orphaning them until the next write to the parent. Relink them once, and fail loudly if that doesn't stick.
+async function ensureBlocksLinkedToParent(
+  tokenV2: string,
+  parentId: string,
+  spaceId: string,
+  blockIds: string[],
+  rawAfterId?: string,
+  rawBeforeId?: string,
+): Promise<void> {
+  if ((await findUnlinkedBlockIds(tokenV2, parentId, blockIds)).length === 0) return
+
+  const afterId = rawAfterId ? formatNotionId(rawAfterId) : undefined
+  const beforeId = rawBeforeId ? formatNotionId(rawBeforeId) : undefined
+  const operations: SaveOperation[] = blockIds.flatMap((id, index): SaveOperation[] => {
+    const pointer = { table: 'block' as const, id: parentId, spaceId }
+    const previousId = index > 0 ? blockIds[index - 1] : afterId
+    const relist: SaveOperation =
+      index === 0 && beforeId
+        ? { pointer, command: 'listBefore', path: ['content'], args: { id, before: beforeId } }
+        : { pointer, command: 'listAfter', path: ['content'], args: previousId ? { id, after: previousId } : { id } }
+    return [{ pointer, command: 'listRemove', path: ['content'], args: { id } }, relist]
+  })
+  await internalRequest(tokenV2, 'saveTransactions', {
+    requestId: generateId(),
+    transactions: [{ id: generateId(), spaceId, operations }],
+  } satisfies SaveTransactionsRequest)
+
+  const stillUnlinked = await findUnlinkedBlockIds(tokenV2, parentId, blockIds)
+  if (stillUnlinked.length > 0) {
+    throw new Error(`Blocks were created but not attached to parent ${parentId}: ${stillUnlinked.join(', ')}`)
+  }
+}
+
+async function findUnlinkedBlockIds(tokenV2: string, parentId: string, blockIds: string[]): Promise<string[]> {
+  const response = (await internalRequest(tokenV2, 'syncRecordValues', {
+    requests: [{ pointer: { table: 'block', id: parentId }, version: -1 }],
+  })) as SyncRecordValuesResponse
+  const parent = assertBlock(getBlockById(response.recordMap.block, parentId), parentId)
+  const content = new Set(parent.content ?? [])
+  return blockIds.filter((id) => !content.has(id))
 }
 
 export async function handleBlockUpdate(

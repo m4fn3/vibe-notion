@@ -478,17 +478,40 @@ function serializeRowProperties(
   return properties
 }
 
+type SchemaPropertyUpdateOperation = {
+  pointer: { table: 'collection'; id: string; spaceId: string }
+  command: 'updateCollectionPropertySchema'
+  path: string[]
+  args: {
+    primitiveOp: { command: 'update'; args: Record<string, CollectionProperty | null> }
+    additionalPropertyIds: string[]
+  }
+}
+
+// Notion rejects plain `set`/`update` on `schema` with a 400; schema edits must go
+// through the same dedicated command the web client uses.
+function buildSchemaPropertyUpdateOperation(
+  collectionId: string,
+  spaceId: string,
+  properties: Record<string, CollectionProperty | null>,
+): SchemaPropertyUpdateOperation {
+  return {
+    pointer: { table: 'collection', id: collectionId, spaceId },
+    command: 'updateCollectionPropertySchema',
+    path: ['schema'],
+    args: {
+      primitiveOp: { command: 'update', args: properties },
+      additionalPropertyIds: [],
+    },
+  }
+}
+
 function buildSchemaOptionUpdates(
   optionValuesToRegister: Record<string, string[]>,
   schema: CollectionSchema,
   collectionId: string,
   spaceId: string,
-): Array<{
-  pointer: { table: 'collection'; id: string; spaceId: string }
-  command: 'update'
-  path: string[]
-  args: CollectionProperty & { options: unknown[] }
-}> {
+): SchemaPropertyUpdateOperation[] {
   return Object.entries(optionValuesToRegister).map(([propId, values]) => {
     const schemaEntry = schema[propId]
     const existingOptions = Array.isArray(schemaEntry.options) ? schemaEntry.options : []
@@ -498,15 +521,9 @@ function buildSchemaOptionUpdates(
       value,
     }))
 
-    return {
-      pointer: { table: 'collection' as const, id: collectionId, spaceId },
-      command: 'update' as const,
-      path: ['schema', propId],
-      args: {
-        ...schemaEntry,
-        options: [...existingOptions, ...newOptions],
-      },
-    }
+    return buildSchemaPropertyUpdateOperation(collectionId, spaceId, {
+      [propId]: { ...schemaEntry, options: [...existingOptions, ...newOptions] },
+    })
   })
 }
 
@@ -529,7 +546,9 @@ async function getAction(rawCollectionId: string, options: GetOptions): Promise<
   try {
     const creds = await getCredentialsOrExit()
     const ctx = await ensureWorkspaceContext(creds, options.workspaceId, collectionId)
-    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId)
+    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId, {
+      warnIfMissing: ctx.workspaceSource === 'explicit',
+    })
     const collection = await fetchCollection(ctx.tokenV2, collectionId)
     console.log(formatOutput(formatCollectionValue(collection as Record<string, unknown>), options.pretty))
   } catch (error) {
@@ -542,7 +561,9 @@ async function queryAction(rawCollectionId: string, options: QueryOptions): Prom
   try {
     const creds = await getCredentialsOrExit()
     const ctx = await ensureWorkspaceContext(creds, options.workspaceId, collectionId)
-    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId)
+    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId, {
+      warnIfMissing: ctx.workspaceSource === 'explicit',
+    })
     const viewId = options.viewId ?? (await resolveCollectionViewId(ctx.tokenV2, collectionId))
 
     const loader: Record<string, unknown> = {
@@ -802,7 +823,9 @@ async function viewGetAction(rawViewId: string, options: ViewGetOptions): Promis
   try {
     const creds = await getCredentialsOrExit()
     const ctx = await ensureWorkspaceContext(creds, options.workspaceId, viewId)
-    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId)
+    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId, {
+      warnIfMissing: ctx.workspaceSource === 'explicit',
+    })
 
     const view = await fetchView(ctx.tokenV2, viewId)
     const viewType = view.type
@@ -834,7 +857,9 @@ async function viewUpdateAction(rawViewId: string, options: ViewUpdateOptions): 
   try {
     const creds = await getCredentialsOrExit()
     const ctx = await ensureWorkspaceContext(creds, options.workspaceId, viewId)
-    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId)
+    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId, {
+      warnIfMissing: ctx.workspaceSource === 'explicit',
+    })
 
     if (!options.show && !options.hide && !options.reorder && !options.resize) {
       throw new Error('Provide --show, --hide, --reorder, or --resize')
@@ -1040,16 +1065,22 @@ function buildSerializedInputProperties(
   return serializeRowProperties(parsed, schema, nameToId, registerOption)
 }
 
+// Notion rejects plain `set` on non-title row properties with a 400.
 function buildRowPropertySetOperations(
   rowId: string,
   spaceId: string,
   serializedProps: Record<string, unknown>,
-): Array<{ pointer: { table: 'block'; id: string; spaceId: string }; command: 'set'; path: string[]; args: unknown }> {
+): Array<{
+  pointer: { table: 'block'; id: string; spaceId: string }
+  command: 'updateBlockPropertyValue'
+  path: string[]
+  args: { primitiveOp: { command: 'set'; args: unknown } }
+}> {
   return Object.entries(serializedProps).map(([propId, value]) => ({
     pointer: { table: 'block' as const, id: rowId, spaceId },
-    command: 'set' as const,
+    command: 'updateBlockPropertyValue' as const,
     path: ['properties', propId],
-    args: value,
+    args: { primitiveOp: { command: 'set' as const, args: value } },
   }))
 }
 
@@ -1098,7 +1129,9 @@ async function viewListAction(rawCollectionId: string, options: ViewListOptions)
   try {
     const creds = await getCredentialsOrExit()
     const ctx = await ensureWorkspaceContext(creds, options.workspaceId, collectionId)
-    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId)
+    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId, {
+      warnIfMissing: ctx.workspaceSource === 'explicit',
+    })
 
     const block = await resolveCollectionBlock(ctx.tokenV2, collectionId)
     const viewIds = block.view_ids ?? []
@@ -1132,7 +1165,9 @@ async function viewAddAction(rawCollectionId: string, options: ViewAddOptions): 
   try {
     const creds = await getCredentialsOrExit()
     const ctx = await ensureWorkspaceContext(creds, options.workspaceId, collectionId)
-    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId)
+    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId, {
+      warnIfMissing: ctx.workspaceSource === 'explicit',
+    })
 
     const viewType = options.type ?? 'table'
     if (!VIEW_TYPES.includes(viewType as (typeof VIEW_TYPES)[number])) {
@@ -1202,7 +1237,9 @@ async function viewDeleteAction(rawViewId: string, options: ViewDeleteOptions): 
   try {
     const creds = await getCredentialsOrExit()
     const ctx = await ensureWorkspaceContext(creds, options.workspaceId, viewId)
-    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId)
+    await resolveAndSetActiveUserId(ctx.tokenV2, ctx.workspaceId, {
+      warnIfMissing: ctx.workspaceSource === 'explicit',
+    })
 
     const view = await fetchView(ctx.tokenV2, viewId)
     const parentId = view.parent_id
@@ -1364,13 +1401,15 @@ export async function handleDatabaseUpdate(
   }
 
   const spaceId = await resolveSpaceId(tokenV2, parentId)
-  const updateArgs: {
-    name?: string[][]
-    schema?: CollectionSchema
-  } = {}
+  const operations: unknown[] = []
 
   if (args.title) {
-    updateArgs.name = [[args.title]]
+    operations.push({
+      pointer: { table: 'collection', id: collectionId, spaceId },
+      command: 'update',
+      path: [],
+      args: { name: [[args.title]] },
+    })
   }
 
   if (args.properties) {
@@ -1396,25 +1435,12 @@ export async function handleDatabaseUpdate(
     }
     resolveRelationProperties(resolvedProperties, mergedSchema, spaceId)
     await resolveRollupReferences(resolvedProperties, mergedSchema, tokenV2)
-    updateArgs.schema = mergedSchema
+    operations.push(buildSchemaPropertyUpdateOperation(collectionId, spaceId, resolvedProperties))
   }
 
   await internalRequest(tokenV2, 'saveTransactions', {
     requestId: generateId(),
-    transactions: [
-      {
-        id: generateId(),
-        spaceId,
-        operations: [
-          {
-            pointer: { table: 'collection', id: collectionId, spaceId },
-            command: 'update',
-            path: [],
-            args: updateArgs,
-          },
-        ],
-      },
-    ],
+    transactions: [{ id: generateId(), spaceId, operations }],
   })
 
   const updated = await fetchCollection(tokenV2, collectionId)
@@ -1468,15 +1494,10 @@ export async function handleDatabaseDeleteProperty(
           {
             pointer: { table: 'collection', id: collectionId, spaceId },
             path: ['deleted_schema'],
-            command: 'update',
-            args: { [propId]: deletedProp },
+            command: 'updateCollectionDeletedPropertySchema',
+            args: { primitiveOp: { command: 'update', args: { [propId]: deletedProp } } },
           },
-          {
-            pointer: { table: 'collection', id: collectionId, spaceId },
-            path: ['schema'],
-            command: 'update',
-            args: { [propId]: null },
-          },
+          buildSchemaPropertyUpdateOperation(collectionId, spaceId, { [propId]: null }),
         ],
       },
     ],
